@@ -14,8 +14,16 @@ from google.oauth2.service_account import Credentials
 
 # ========== НАСТРОЙКИ ==========
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-MANAGER_ID = int(os.environ.get("MANAGER_ID", "0"))
 GOOGLE_SHEETS_KEY = os.environ.get("GOOGLE_SHEETS_KEY")
+
+# Читаем список ID менеджеров из переменной окружения (через запятую)
+MANAGER_IDS_STR = os.environ.get("MANAGER_IDS", "")
+MANAGER_IDS = [int(x.strip()) for x in MANAGER_IDS_STR.split(",") if x.strip()]
+
+if not MANAGER_IDS:
+    print("⚠️ ВНИМАНИЕ: MANAGER_IDS не указан! Кнопка Помощь не будет работать.")
+else:
+    print(f"✅ Загружены менеджеры: {MANAGER_IDS}")
 
 app = Flask(__name__)
 
@@ -225,15 +233,62 @@ async def start(update: Update, context):
     await show_main_menu(update, context)
 
 async def help_handler(update: Update, context):
-    if MANAGER_ID:
-        await context.bot.forward_message(
-            chat_id=MANAGER_ID,
-            from_chat_id=update.effective_chat.id,
-            message_id=update.effective_message.id
+    """Помощь — пересылка сообщения ВСЕМ менеджерам"""
+    query = update.callback_query
+    await query.answer()
+
+    if not MANAGER_IDS:
+        await query.message.reply_text("🆘 Менеджер пока не назначен. Попробуйте позже.")
+        return
+
+    success_count = 0
+    for manager_id in MANAGER_IDS:
+        try:
+            await context.bot.forward_message(
+                chat_id=manager_id,
+                from_chat_id=update.effective_chat.id,
+                message_id=update.effective_message.message_id
+            )
+            success_count += 1
+        except Exception as e:
+            print(f"Ошибка отправки менеджеру {manager_id}: {e}")
+
+    if success_count > 0:
+        await query.message.reply_text(
+            f"🆘 Сообщение отправлено {success_count} менеджер(ам).\n\n"
+            f"Ответ придёт в ближайшее время."
         )
-        await update.callback_query.message.reply_text("🆘 Сообщение отправлено менеджеру.")
     else:
-        await update.callback_query.message.reply_text("🆘 Менеджер пока не назначен.")
+        await query.message.reply_text("❌ Не удалось отправить сообщение. Попробуйте позже.")
+
+# ========== ОТВЕТЫ МЕНЕДЖЕРОВ ПОЛЬЗОВАТЕЛЯМ ==========
+async def manager_reply(update: Update, context):
+    """
+    Когда менеджер отвечает на пересланное сообщение пользователя,
+    бот отправляет ответ оригинальному пользователю
+    """
+    # Проверяем, что отправитель — менеджер
+    if update.effective_user.id not in MANAGER_IDS:
+        return
+
+    message = update.message
+
+    # Если ответ на пересланное сообщение
+    if message.reply_to_message and message.reply_to_message.forward_origin:
+        try:
+            user_id = message.reply_to_message.forward_origin.chat.id
+
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"📩 *Ответ от поддержки:*\n\n{message.text}",
+                parse_mode="Markdown"
+            )
+
+            await message.reply_text("✅ Ответ отправлен пользователю.")
+
+        except Exception as e:
+            await message.reply_text(f"❌ Ошибка отправки: {e}")
+            print(f"Ошибка manager_reply: {e}")
 
 # ========== ВЫБОР РОЛИ ==========
 async def role_choice(update: Update, context):
@@ -543,7 +598,10 @@ async def unknown(update: Update, context):
 async def run_bot():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
+    # Команды
     application.add_handler(CommandHandler("start", start))
+
+    # Callback handlers
     application.add_handler(CallbackQueryHandler(role_choice, pattern="^role_"))
     application.add_handler(CallbackQueryHandler(catalog, pattern="^catalog$"))
     application.add_handler(CallbackQueryHandler(my_ads, pattern="^my_ads$"))
@@ -555,6 +613,14 @@ async def run_bot():
     application.add_handler(CallbackQueryHandler(mark_issued, pattern="^issued_"))
     application.add_handler(CallbackQueryHandler(mark_returned, pattern="^returned_"))
 
+    # Обработчик ответов менеджеров
+    if MANAGER_IDS:
+        application.add_handler(MessageHandler(
+            filters.TEXT & filters.REPLY & filters.Chat(chat_id=MANAGER_IDS),
+            manager_reply
+        ))
+
+    # Бронирование (Conversation)
     book_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(start_booking, pattern="^book_")],
         states={
@@ -566,6 +632,7 @@ async def run_bot():
     )
     application.add_handler(book_conv)
 
+    # Добавление техники (Conversation)
     add_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(add_item_start, pattern="^add_item$")],
         states={
@@ -581,6 +648,7 @@ async def run_bot():
     )
     application.add_handler(add_conv)
 
+    # Заглушка для неизвестных сообщений
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, unknown))
 
     print("🚀 Бот запущен!")
@@ -601,6 +669,7 @@ def home():
 def health():
     return "OK", 200
 
+# ========== ТОЧКА ВХОДА ==========
 if __name__ == "__main__":
     init_google_sheets()
 
