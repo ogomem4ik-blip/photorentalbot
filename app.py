@@ -30,7 +30,8 @@ app = Flask(__name__)
 # Состояния для диалогов
 NAME, PHOTO, PRICE, MIN_HOURS, CITY, DESCRIPTION, CONTACT = range(7)
 SELECT_DAY, SELECT_HOUR, SELECT_DURATION = range(10, 13)
-HELP_MESSAGE = 20  # Состояние для диалога помощи
+HELP_MESSAGE = 20
+AWAITING_REPLY_TEXT = 30  # Состояние для ответа менеджера
 
 # Глобальные переменные для Google Sheets
 gc = None
@@ -195,6 +196,24 @@ def get_last_order_id():
     orders = get_orders_from_sheets()
     return orders[-1]['id'] if orders else 1
 
+# ========== ВЫБОР РОЛИ ==========
+async def role_choice(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+
+    role = "Арендатор" if query.data == "role_renter" else "Арендодатель"
+    context.user_data['role'] = role
+    context.user_data['user_id'] = query.from_user.id
+
+    save_user_to_sheets(
+        query.from_user.id,
+        role,
+        query.from_user.username or "",
+        query.from_user.full_name or ""
+    )
+
+    await show_main_menu(update, context)
+
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 async def show_main_menu(update: Update, context):
     role = context.user_data.get('role', '')
@@ -235,7 +254,6 @@ async def start(update: Update, context):
 
 # ========== ПОМОЩЬ С ДИАЛОГОМ ==========
 async def help_start(update: Update, context):
-    """Начало диалога помощи — просим пользователя написать сообщение"""
     query = update.callback_query
     await query.answer()
     
@@ -247,7 +265,6 @@ async def help_start(update: Update, context):
     return HELP_MESSAGE
 
 async def help_send(update: Update, context):
-    """Получаем текст от пользователя и пересылаем менеджерам"""
     user_message = update.message.text
     user = update.effective_user
     user_link = f"@{user.username}" if user.username else f"Пользователь {user.id}"
@@ -259,6 +276,13 @@ async def help_send(update: Update, context):
     success_count = 0
     for manager_id in MANAGER_IDS:
         try:
+            # Создаём кнопку для ответа
+            keyboard = [[InlineKeyboardButton(
+                f"✏️ Ответить пользователю {user.id}",
+                callback_data=f"reply_{user.id}"
+            )]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
             await context.bot.send_message(
                 chat_id=manager_id,
                 text=f"📩 *Новое обращение в поддержку*\n\n"
@@ -268,9 +292,9 @@ async def help_send(update: Update, context):
                      f"➖➖➖➖➖➖➖➖➖\n"
                      f"{user_message}\n"
                      f"➖➖➖➖➖➖➖➖➖\n\n"
-                     f"💡 *Чтобы ответить пользователю:*\n"
-                     f"Напишите `/reply {user.id} Ваш ответ`",
-                parse_mode="Markdown"
+                     f"✏️ *Нажмите на кнопку ниже, чтобы ответить:*",
+                parse_mode="Markdown",
+                reply_markup=reply_markup
             )
             success_count += 1
         except Exception as e:
@@ -287,60 +311,59 @@ async def help_send(update: Update, context):
     return ConversationHandler.END
 
 async def help_cancel(update: Update, context):
-    """Отмена отправки сообщения в поддержку"""
     await update.message.reply_text("❌ Отправка сообщения отменена.")
     return ConversationHandler.END
 
-# ========== ОТВЕТ МЕНЕДЖЕРА ПО КОМАНДЕ ==========
-async def reply_to_user(update: Update, context):
-    """Команда для менеджера: /reply user_id текст ответа"""
-    if update.effective_user.id not in MANAGER_IDS:
-        await update.message.reply_text("❌ У вас нет прав для этой команды.")
+# ========== ОТВЕТ ПОЛЬЗОВАТЕЛЮ ЧЕРЕЗ КНОПКУ ==========
+async def reply_button_handler(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    
+    if query.from_user.id not in MANAGER_IDS:
+        await query.message.reply_text("❌ У вас нет прав для ответа.")
         return
     
+    user_id = int(query.data.split('_')[1])
+    context.user_data['replying_to'] = user_id
+    
+    await query.message.reply_text(
+        f"✏️ Введите ваш ответ для пользователя {user_id}:\n\n"
+        f"Просто напишите текст — я отправлю его пользователю."
+    )
+    return AWAITING_REPLY_TEXT
+
+async def send_reply_to_user(update: Update, context):
+    user_id = context.user_data.get('replying_to')
+    
+    if not user_id:
+        await update.message.reply_text("❌ Не определён пользователь для ответа.")
+        return
+    
+    reply_text = update.message.text
+    
     try:
-        parts = update.message.text.split(maxsplit=2)
-        if len(parts) < 3:
-            await update.message.reply_text(
-                "❌ Формат команды: `/reply user_id Текст ответа`\n\n"
-                "Пример: `/reply 123456789 Ваша камера готова`",
-                parse_mode="Markdown"
-            )
-            return
-        
-        user_id = int(parts[1])
-        reply_text = parts[2]
-        
         await context.bot.send_message(
             chat_id=user_id,
             text=f"📩 *Ответ от поддержки:*\n\n{reply_text}",
             parse_mode="Markdown"
         )
         
-        await update.message.reply_text(f"✅ Ответ отправлен пользователю {user_id}.")
+        await update.message.reply_text(
+            f"✅ Ответ отправлен пользователю {user_id}.\n\n"
+            f"Текст ответа:\n➖➖➖➖➖➖➖➖➖\n{reply_text}"
+        )
         
-    except ValueError:
-        await update.message.reply_text("❌ Неверный формат user_id. Должны быть только цифры.")
+        context.user_data['replying_to'] = None
+        
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка отправки: {e}")
+    
+    return ConversationHandler.END
 
-# ========== ВЫБОР РОЛИ ==========
-async def role_choice(update: Update, context):
-    query = update.callback_query
-    await query.answer()
-
-    role = "Арендатор" if query.data == "role_renter" else "Арендодатель"
-    context.user_data['role'] = role
-    context.user_data['user_id'] = query.from_user.id
-
-    save_user_to_sheets(
-        query.from_user.id,
-        role,
-        query.from_user.username or "",
-        query.from_user.full_name or ""
-    )
-
-    await show_main_menu(update, context)
+async def cancel_reply(update: Update, context):
+    context.user_data['replying_to'] = None
+    await update.message.reply_text("❌ Ответ отменён.")
+    return ConversationHandler.END
 
 # ========== КАТАЛОГ ==========
 async def catalog(update: Update, context):
@@ -634,7 +657,6 @@ async def run_bot():
 
     # Команды
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("reply", reply_to_user))
 
     # Callback handlers
     application.add_handler(CallbackQueryHandler(role_choice, pattern="^role_"))
@@ -647,7 +669,7 @@ async def run_bot():
     application.add_handler(CallbackQueryHandler(mark_issued, pattern="^issued_"))
     application.add_handler(CallbackQueryHandler(mark_returned, pattern="^returned_"))
 
-    # Бронирование (Conversation)
+    # Бронирование
     book_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(start_booking, pattern="^book_")],
         states={
@@ -659,7 +681,7 @@ async def run_bot():
     )
     application.add_handler(book_conv)
 
-    # Добавление техники (Conversation)
+    # Добавление техники
     add_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(add_item_start, pattern="^add_item$")],
         states={
@@ -675,7 +697,7 @@ async def run_bot():
     )
     application.add_handler(add_conv)
 
-    # Помощь (Conversation)
+    # Помощь
     help_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(help_start, pattern="^help$")],
         states={
@@ -685,7 +707,17 @@ async def run_bot():
     )
     application.add_handler(help_conv)
 
-    # Заглушка для неизвестных сообщений
+    # Ответ менеджера через кнопку
+    reply_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(reply_button_handler, pattern="^reply_")],
+        states={
+            AWAITING_REPLY_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, send_reply_to_user)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_reply)],
+    )
+    application.add_handler(reply_conv)
+
+    # Заглушка
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, unknown))
 
     print("🚀 Бот запущен!")
