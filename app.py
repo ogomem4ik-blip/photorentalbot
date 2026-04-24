@@ -30,6 +30,7 @@ app = Flask(__name__)
 # Состояния для диалогов
 NAME, PHOTO, PRICE, MIN_HOURS, CITY, DESCRIPTION, CONTACT = range(7)
 SELECT_DAY, SELECT_HOUR, SELECT_DURATION = range(10, 13)
+HELP_MESSAGE = 20  # Состояние для диалога помощи
 
 # Глобальные переменные для Google Sheets
 gc = None
@@ -232,63 +233,96 @@ async def start(update: Update, context):
     context.user_data.clear()
     await show_main_menu(update, context)
 
-async def help_handler(update: Update, context):
-    """Помощь — пересылка сообщения ВСЕМ менеджерам"""
+# ========== ПОМОЩЬ С ДИАЛОГОМ ==========
+async def help_start(update: Update, context):
+    """Начало диалога помощи — просим пользователя написать сообщение"""
     query = update.callback_query
     await query.answer()
+    
+    await query.message.reply_text(
+        "🆘 Напишите ваш вопрос или проблему.\n\n"
+        "Я перешлю его менеджеру, и вам ответят в ближайшее время.\n\n"
+        "✏️ Введите ваше сообщение:"
+    )
+    return HELP_MESSAGE
 
+async def help_send(update: Update, context):
+    """Получаем текст от пользователя и пересылаем менеджерам"""
+    user_message = update.message.text
+    user = update.effective_user
+    user_link = f"@{user.username}" if user.username else f"Пользователь {user.id}"
+    
     if not MANAGER_IDS:
-        await query.message.reply_text("🆘 Менеджер пока не назначен. Попробуйте позже.")
-        return
-
+        await update.message.reply_text("🆘 Менеджер пока не назначен. Попробуйте позже.")
+        return ConversationHandler.END
+    
     success_count = 0
     for manager_id in MANAGER_IDS:
         try:
-            await context.bot.forward_message(
+            await context.bot.send_message(
                 chat_id=manager_id,
-                from_chat_id=update.effective_chat.id,
-                message_id=update.effective_message.message_id
+                text=f"📩 *Новое обращение в поддержку*\n\n"
+                     f"👤 От: {user_link}\n"
+                     f"🆔 ID: {user.id}\n"
+                     f"📝 Сообщение:\n"
+                     f"➖➖➖➖➖➖➖➖➖\n"
+                     f"{user_message}\n"
+                     f"➖➖➖➖➖➖➖➖➖\n\n"
+                     f"💡 *Чтобы ответить пользователю:*\n"
+                     f"Напишите `/reply {user.id} Ваш ответ`",
+                parse_mode="Markdown"
             )
             success_count += 1
         except Exception as e:
             print(f"Ошибка отправки менеджеру {manager_id}: {e}")
-
+    
     if success_count > 0:
-        await query.message.reply_text(
+        await update.message.reply_text(
             f"🆘 Сообщение отправлено {success_count} менеджер(ам).\n\n"
-            f"Ответ придёт в ближайшее время."
+            f"Ответ поступит в ближайшее время."
         )
     else:
-        await query.message.reply_text("❌ Не удалось отправить сообщение. Попробуйте позже.")
+        await update.message.reply_text("❌ Не удалось отправить сообщение. Попробуйте позже.")
+    
+    return ConversationHandler.END
 
-# ========== ОТВЕТЫ МЕНЕДЖЕРОВ ПОЛЬЗОВАТЕЛЯМ ==========
-async def manager_reply(update: Update, context):
-    """
-    Когда менеджер отвечает на пересланное сообщение пользователя,
-    бот отправляет ответ оригинальному пользователю
-    """
-    # Проверяем, что отправитель — менеджер
+async def help_cancel(update: Update, context):
+    """Отмена отправки сообщения в поддержку"""
+    await update.message.reply_text("❌ Отправка сообщения отменена.")
+    return ConversationHandler.END
+
+# ========== ОТВЕТ МЕНЕДЖЕРА ПО КОМАНДЕ ==========
+async def reply_to_user(update: Update, context):
+    """Команда для менеджера: /reply user_id текст ответа"""
     if update.effective_user.id not in MANAGER_IDS:
+        await update.message.reply_text("❌ У вас нет прав для этой команды.")
         return
-
-    message = update.message
-
-    # Если ответ на пересланное сообщение
-    if message.reply_to_message and message.reply_to_message.forward_origin:
-        try:
-            user_id = message.reply_to_message.forward_origin.chat.id
-
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=f"📩 *Ответ от поддержки:*\n\n{message.text}",
+    
+    try:
+        parts = update.message.text.split(maxsplit=2)
+        if len(parts) < 3:
+            await update.message.reply_text(
+                "❌ Формат команды: `/reply user_id Текст ответа`\n\n"
+                "Пример: `/reply 123456789 Ваша камера готова`",
                 parse_mode="Markdown"
             )
-
-            await message.reply_text("✅ Ответ отправлен пользователю.")
-
-        except Exception as e:
-            await message.reply_text(f"❌ Ошибка отправки: {e}")
-            print(f"Ошибка manager_reply: {e}")
+            return
+        
+        user_id = int(parts[1])
+        reply_text = parts[2]
+        
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"📩 *Ответ от поддержки:*\n\n{reply_text}",
+            parse_mode="Markdown"
+        )
+        
+        await update.message.reply_text(f"✅ Ответ отправлен пользователю {user_id}.")
+        
+    except ValueError:
+        await update.message.reply_text("❌ Неверный формат user_id. Должны быть только цифры.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка отправки: {e}")
 
 # ========== ВЫБОР РОЛИ ==========
 async def role_choice(update: Update, context):
@@ -600,25 +634,18 @@ async def run_bot():
 
     # Команды
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("reply", reply_to_user))
 
     # Callback handlers
     application.add_handler(CallbackQueryHandler(role_choice, pattern="^role_"))
     application.add_handler(CallbackQueryHandler(catalog, pattern="^catalog$"))
     application.add_handler(CallbackQueryHandler(my_ads, pattern="^my_ads$"))
     application.add_handler(CallbackQueryHandler(my_orders, pattern="^my_orders$"))
-    application.add_handler(CallbackQueryHandler(help_handler, pattern="^help$"))
     application.add_handler(CallbackQueryHandler(delete_item, pattern="^delete_"))
     application.add_handler(CallbackQueryHandler(discuss_order, pattern="^discuss_"))
     application.add_handler(CallbackQueryHandler(reject_order, pattern="^reject_"))
     application.add_handler(CallbackQueryHandler(mark_issued, pattern="^issued_"))
     application.add_handler(CallbackQueryHandler(mark_returned, pattern="^returned_"))
-
-    # Обработчик ответов менеджеров
-    if MANAGER_IDS:
-        application.add_handler(MessageHandler(
-            filters.TEXT & filters.REPLY & filters.Chat(chat_id=MANAGER_IDS),
-            manager_reply
-        ))
 
     # Бронирование (Conversation)
     book_conv = ConversationHandler(
@@ -647,6 +674,16 @@ async def run_bot():
         fallbacks=[CommandHandler("cancel", cancel)],
     )
     application.add_handler(add_conv)
+
+    # Помощь (Conversation)
+    help_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(help_start, pattern="^help$")],
+        states={
+            HELP_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, help_send)],
+        },
+        fallbacks=[CommandHandler("cancel", help_cancel)],
+    )
+    application.add_handler(help_conv)
 
     # Заглушка для неизвестных сообщений
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, unknown))
