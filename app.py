@@ -747,6 +747,7 @@ async def unknown(update: Update, context):
     await update.message.reply_text("❓ Напишите /start")
 
 # ========== ЗАПУСК БОТА ==========
+# ========== ЗАПУСК БОТА ==========
 async def run_bot():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
@@ -761,4 +762,84 @@ async def run_bot():
     application.add_handler(CallbackQueryHandler(my_orders_command, pattern="^my_orders$"))
     application.add_handler(CallbackQueryHandler(delete_item, pattern="^delete_"))
     application.add_handler(CallbackQueryHandler(discuss_order, pattern="^discuss_"))
-    application.add_handler(CallbackQueryHandler(reject_order, pattern="
+    application.add_handler(CallbackQueryHandler(reject_order, pattern="^reject_"))
+    application.add_handler(CallbackQueryHandler(mark_issued, pattern="^issued_"))
+    application.add_handler(CallbackQueryHandler(mark_returned, pattern="^returned_"))
+
+    # Каталог с пагинацией
+    catalog_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(catalog, pattern="^catalog$")],
+        states={
+            VIEW_CATALOG: [
+                CallbackQueryHandler(catalog_navigation, pattern="^catalog_(prev|next)$"),
+                CallbackQueryHandler(catalog_book, pattern="^catalog_book_"),
+                CallbackQueryHandler(catalog_exit, pattern="^catalog_exit$"),
+            ],
+            SELECT_DAY: [
+                CallbackQueryHandler(start_booking, pattern="^book_day_"),
+                CallbackQueryHandler(catalog_exit, pattern="^catalog_exit$"),
+                CallbackQueryHandler(back_to_day, pattern="^back_to_day$"),
+            ],
+            SELECT_HOUR: [
+                CallbackQueryHandler(select_hour, pattern="^book_hour_"),
+                CallbackQueryHandler(select_hour, pattern="^back_to_catalog$"),
+            ],
+            SELECT_DURATION: [
+                CallbackQueryHandler(select_duration, pattern="^book_dur_"),
+                CallbackQueryHandler(back_to_day, pattern="^back_to_day$"),
+            ],
+        },
+        fallbacks=[CallbackQueryHandler(catalog_exit, pattern="^catalog_exit$")],
+    )
+    application.add_handler(catalog_conv)
+
+    # Добавление техники
+    add_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(add_item_start, pattern="^add_item$")],
+        states={
+            NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_item_name)],
+            PHOTO: [MessageHandler(filters.PHOTO, add_item_photo)],
+            PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_item_price)],
+            MIN_HOURS: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_item_min_hours)],
+            CITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_item_city)],
+            DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_item_description)],
+            CONTACT: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_item_contact)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+    application.add_handler(add_conv)
+
+    # Помощь
+    help_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(help_start, pattern="^help$"),
+            CommandHandler("help", help_start)
+        ],
+        states={
+            HELP_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, help_send)],
+        },
+        fallbacks=[CommandHandler("cancel", help_cancel)],
+    )
+    application.add_handler(help_conv)
+
+    # Ответ менеджера
+    reply_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(reply_button_handler, pattern="^reply_")],
+        states={
+            AWAITING_REPLY_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, send_reply_to_user)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_reply)],
+    )
+    application.add_handler(reply_conv)
+
+    # Заглушка для неизвестных сообщений
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, unknown))
+
+    print("🚀 Бот запущен!")
+
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
+
+    while True:
+        await asyncio.sleep(1)
