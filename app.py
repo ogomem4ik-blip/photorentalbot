@@ -759,4 +759,6 @@ async def run_bot():
     application.add_handler(CallbackQueryHandler(role_choice, pattern="^role_"))
     application.add_handler(CallbackQueryHandler(my_ads_callback, pattern="^my_ads$"))
     application.add_handler(CallbackQueryHandler(my_orders_command, pattern="^my_orders$"))
-    application.add_handler(CallbackQueryHandler(delete_item,
+    application.add_handler(CallbackQueryHandler(delete_item, pattern="^delete_"))
+    application.add_handler(CallbackQueryHandler(discuss_order, pattern="^discuss_"))
+    application.add_handler(CallbackQueryHandler(reject_order, pattern="
