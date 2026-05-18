@@ -747,7 +747,6 @@ async def unknown(update: Update, context):
     await update.message.reply_text("❓ Напишите /start")
 
 # ========== ЗАПУСК БОТА ==========
-# ========== ЗАПУСК БОТА ==========
 async def run_bot():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
@@ -756,7 +755,7 @@ async def run_bot():
     application.add_handler(CommandHandler("my_ads", my_ads_command))
     application.add_handler(CommandHandler("my_orders", my_orders_command))
 
-    # Базовые callback
+        # Базовые callback
     application.add_handler(CallbackQueryHandler(role_choice, pattern="^role_"))
     application.add_handler(CallbackQueryHandler(my_ads_callback, pattern="^my_ads$"))
     application.add_handler(CallbackQueryHandler(my_orders_command, pattern="^my_orders$"))
@@ -843,3 +842,24 @@ async def run_bot():
 
     while True:
         await asyncio.sleep(1)
+
+# ========== FLASK ==========
+@app.route('/')
+def home():
+    return "Photo Rental Bot is running!"
+
+@app.route('/health')
+def health():
+    return "OK", 200
+
+# ========== ТОЧКА ВХОДА ==========
+if __name__ == "__main__":
+    init_google_sheets()
+    threading.Thread(target=lambda: asyncio.run(run_bot()), daemon=True).start()
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+
+
+
+
+
+
