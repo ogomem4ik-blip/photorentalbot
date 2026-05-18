@@ -31,6 +31,7 @@ NAME, PHOTO, PRICE, MIN_HOURS, CITY, DESCRIPTION, CONTACT = range(7)
 SELECT_DAY, SELECT_HOUR, SELECT_DURATION = range(10, 13)
 HELP_MESSAGE = 20
 AWAITING_REPLY_TEXT = 30
+VIEW_CATALOG = 40
 
 # Google Sheets
 gc = None
@@ -270,67 +271,181 @@ async def role_choice(update: Update, context):
     )
     await show_main_menu(update, context)
 
-# ========== КАТАЛОГ ==========
+# ========== КАТАЛОГ С ПАГИНАЦИЕЙ ==========
 async def catalog(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    
     items = get_items_from_sheets()
     if not items:
-        await update.callback_query.message.reply_text("📭 Пока нет объявлений.")
+        await query.message.reply_text("📭 Пока нет объявлений.")
         return
+    
+    context.user_data['catalog_items'] = items
+    context.user_data['catalog_index'] = 0
+    
+    await show_catalog_item(update, context)
+    return VIEW_CATALOG
 
-    for item in items:
-        text = f"📷 *{item['name']}*\n💰 {item['price']} ₽/час\n⏰ Мин. аренда: {item.get('min_hours', 1)} час(ов)\n📍 {item['city']}\n\n{item['description']}"
-        keyboard = [[InlineKeyboardButton("📅 Забронировать", callback_data=f"book_{item['id']}")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
+async def show_catalog_item(update: Update, context, index=None):
+    items = context.user_data.get('catalog_items', [])
+    if not items:
+        await update.callback_query.message.reply_text("📭 Каталог пуст.")
+        return
+    
+    if index is not None:
+        context.user_data['catalog_index'] = index
+    current_index = context.user_data.get('catalog_index', 0)
+    
+    if current_index < 0:
+        current_index = 0
+        context.user_data['catalog_index'] = 0
+    if current_index >= len(items):
+        current_index = len(items) - 1
+        context.user_data['catalog_index'] = len(items) - 1
+    
+    item = items[current_index]
+    
+    text = f"📷 *{item['name']}*\n"
+    text += f"💰 {item['price']} ₽/час\n"
+    text += f"⏰ Мин. аренда: {item.get('min_hours', 1)} час(ов)\n"
+    text += f"📍 {item['city']}\n\n"
+    text += f"{item['description']}\n\n"
+    text += f"📊 Товар {current_index + 1} из {len(items)}"
+    
+    keyboard = []
+    nav_buttons = []
+    if current_index > 0:
+        nav_buttons.append(InlineKeyboardButton("◀ Назад", callback_data="catalog_prev"))
+    if current_index < len(items) - 1:
+        nav_buttons.append(InlineKeyboardButton("Вперёд ▶", callback_data="catalog_next"))
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+    
+    keyboard.append([InlineKeyboardButton("📅 Забронировать", callback_data=f"catalog_book_{item['id']}")])
+    keyboard.append([InlineKeyboardButton("❌ Выйти", callback_data="catalog_exit")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    if update.callback_query and update.callback_query.message:
+        await update.callback_query.message.edit_text(text, parse_mode="Markdown", reply_markup=reply_markup)
+    else:
         if item.get('photo'):
             try:
-                await update.callback_query.message.reply_photo(photo=item['photo'], caption=text, parse_mode="Markdown", reply_markup=reply_markup)
+                await update.message.reply_photo(photo=item['photo'], caption=text, parse_mode="Markdown", reply_markup=reply_markup)
             except Exception:
-                await update.callback_query.message.reply_text(text, parse_mode="Markdown", reply_markup=reply_markup)
+                await update.message.reply_text(text, parse_mode="Markdown", reply_markup=reply_markup)
         else:
-            await update.callback_query.message.reply_text(text, parse_mode="Markdown", reply_markup=reply_markup)
+            await update.message.reply_text(text, parse_mode="Markdown", reply_markup=reply_markup)
+
+async def catalog_navigation(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    
+    direction = query.data.split('_')[1]
+    current_index = context.user_data.get('catalog_index', 0)
+    items = context.user_data.get('catalog_items', [])
+    
+    new_index = current_index - 1 if direction == 'prev' else current_index + 1
+    
+    if 0 <= new_index < len(items):
+        context.user_data['catalog_index'] = new_index
+        await show_catalog_item(update, context)
+
+async def catalog_book(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    
+    item_id = int(query.data.split('_')[2])
+    items = get_items_from_sheets()
+    item = next((i for i in items if i['id'] == item_id), None)
+    
+    if not item:
+        await query.message.reply_text("❌ Товар не найден.")
+        return
+    
+    context.user_data['booking_item'] = item
+    
+    keyboard = []
+    for i in range(7):
+        date = datetime.now() + timedelta(days=i)
+        keyboard.append([InlineKeyboardButton(date.strftime("%d.%m.%Y"), callback_data=f"book_day_{i}")])
+    keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="catalog_exit")])
+    
+    await query.message.edit_text(
+        f"📅 Выберите ДЕНЬ аренды для:\n📷 {item['name']}",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return SELECT_DAY
+
+async def catalog_exit(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    
+    context.user_data.pop('catalog_items', None)
+    context.user_data.pop('catalog_index', None)
+    await show_main_menu(update, context)
+    return ConversationHandler.END
 
 # ========== БРОНИРОВАНИЕ ==========
 async def start_booking(update: Update, context):
     query = update.callback_query
     await query.answer()
-    item_id = int(query.data.split('_')[1])
-    items = get_items_from_sheets()
-    item = next((i for i in items if i['id'] == item_id), None)
-    if not item:
-        await query.message.reply_text("❌ Товар не найден")
-        return
-    context.user_data['booking_item'] = item
-    keyboard = []
-    for i in range(7):
-        date = datetime.now() + timedelta(days=i)
-        keyboard.append([InlineKeyboardButton(date.strftime("%d.%m.%Y"), callback_data=f"day_{i}")])
-    await query.message.reply_text("Выберите ДЕНЬ аренды:", reply_markup=InlineKeyboardMarkup(keyboard))
-    return SELECT_DAY
-
-async def select_day(update: Update, context):
-    query = update.callback_query
-    await query.answer()
-    day_offset = int(query.data.split('_')[1])
+    
+    day_offset = int(query.data.split('_')[2])
     context.user_data['booking_date'] = datetime.now() + timedelta(days=day_offset)
-    keyboard = [[InlineKeyboardButton(f"{h}:00", callback_data=f"hour_{h}")] for h in range(10, 21)]
-    await query.message.reply_text(f"📅 {context.user_data['booking_date'].strftime('%d.%m.%Y')}\nВыберите ЧАС начала:", reply_markup=InlineKeyboardMarkup(keyboard))
+    
+    keyboard = [[InlineKeyboardButton(f"{h}:00", callback_data=f"book_hour_{h}")] for h in range(10, 21)]
+    keyboard.append([InlineKeyboardButton("◀ Назад", callback_data="back_to_catalog")])
+    
+    await query.message.edit_text(
+        f"📅 {context.user_data['booking_date'].strftime('%d.%m.%Y')}\nВыберите ЧАС начала:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
     return SELECT_HOUR
 
 async def select_hour(update: Update, context):
     query = update.callback_query
     await query.answer()
-    context.user_data['booking_hour'] = int(query.data.split('_')[1])
+    
+    if query.data == "back_to_catalog":
+        await show_catalog_item(update, context)
+        return VIEW_CATALOG
+    
+    context.user_data['booking_hour'] = int(query.data.split('_')[2])
     item = context.user_data['booking_item']
     min_hours = item.get('min_hours', 1)
-    keyboard = [[InlineKeyboardButton(f"{h} час(ов)", callback_data=f"dur_{h}")] for h in range(min_hours, min(13, min_hours + 5))]
-    await query.message.reply_text(f"⏰ Начало в {context.user_data['booking_hour']}:00\nВыберите ДЛИТЕЛЬНОСТЬ:", reply_markup=InlineKeyboardMarkup(keyboard))
+    
+    keyboard = [[InlineKeyboardButton(f"{h} час(ов)", callback_data=f"book_dur_{h}")] for h in range(min_hours, min(13, min_hours + 5))]
+    keyboard.append([InlineKeyboardButton("◀ Назад", callback_data="back_to_day")])
+    
+    await query.message.edit_text(
+        f"⏰ Начало в {context.user_data['booking_hour']}:00\nВыберите ДЛИТЕЛЬНОСТЬ:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
     return SELECT_DURATION
+
+async def back_to_day(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    
+    item = context.user_data['booking_item']
+    keyboard = []
+    for i in range(7):
+        date = datetime.now() + timedelta(days=i)
+        keyboard.append([InlineKeyboardButton(date.strftime("%d.%m.%Y"), callback_data=f"book_day_{i}")])
+    keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="catalog_exit")])
+    
+    await query.message.edit_text(
+        f"📅 Выберите ДЕНЬ аренды для:\n📷 {item['name']}",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return SELECT_DAY
 
 async def select_duration(update: Update, context):
     query = update.callback_query
     await query.answer()
-    duration = int(query.data.split('_')[1])
+    duration = int(query.data.split('_')[2])
     start_dt = context.user_data['booking_date'].replace(hour=context.user_data['booking_hour'], minute=0)
     end_dt = start_dt + timedelta(hours=duration)
     item = context.user_data['booking_item']
@@ -340,7 +455,6 @@ async def select_duration(update: Update, context):
         await query.message.reply_text("❌ Это время уже занято!")
         return
     
-    # Сохраняем заказ
     new_row = [
         "", str(item['id']), str(update.effective_user.id), str(item['owner_id']),
         start_dt.isoformat(), end_dt.isoformat(), str(duration), str(total_price),
@@ -348,11 +462,9 @@ async def select_duration(update: Update, context):
     ]
     orders_sheet.append_row(new_row)
     
-    # Получаем ID заказа (номер строки)
     all_orders = orders_sheet.get_all_values()
-    order_id = len(all_orders)
+    order_id = len(all_orders) - 1
     
-    # Сохраняем бронирование
     bookings_sheet.append_row([
         "", str(item['id']), str(order_id), start_dt.isoformat(), end_dt.isoformat()
     ])
@@ -373,13 +485,13 @@ async def discuss_order(update: Update, context):
     order_id = int(query.data.split('_')[1])
     
     all_rows = orders_sheet.get_all_values()
-    if order_id >= len(all_rows) or order_id < 1:
-        await query.message.reply_text("❌ Заказ не найден")
+    if order_id < 1 or order_id >= len(all_rows):
+        await query.message.reply_text(f"❌ Заказ #{order_id} не найден.")
         return
     
     row = all_rows[order_id]
-    if len(row) < 9:
-        await query.message.reply_text("❌ Заказ не найден")
+    if len(row) < 3:
+        await query.message.reply_text(f"❌ Заказ #{order_id} повреждён.")
         return
     
     order_data = {
@@ -387,12 +499,13 @@ async def discuss_order(update: Update, context):
         'item_id': int(row[1]) if row[1] else 0,
         'renter_id': int(row[2]) if row[2] else 0,
         'owner_id': int(row[3]) if row[3] else 0,
-        'start_datetime': row[4],
-        'end_datetime': row[5],
-        'total_price': int(row[7]) if row[7] else 0,
+        'status': row[8] if len(row) > 8 else 'Новая заявка'
     }
     
-    # Обновляем статус
+    if order_data['status'] != 'Новая заявка':
+        await query.message.reply_text(f"❌ Заказ уже в статусе «{order_data['status']}».")
+        return
+    
     orders_sheet.update_cell(order_id, 9, "В обсуждении")
     
     items = get_items_from_sheets()
@@ -400,12 +513,12 @@ async def discuss_order(update: Update, context):
     
     await context.bot.send_message(
         chat_id=order_data['renter_id'],
-        text=f"✅ Арендодатель готов обсуждать детали!\n\n📞 Его контакт: {item.get('contact', 'не указан')}\n\nОбсудите условия аренды напрямую."
+        text=f"✅ Арендодатель готов обсуждать!\n\n📞 Его контакт: {item.get('contact', 'не указан')}"
     )
     
     renter_contact = f"@{query.from_user.username}" if query.from_user.username else f"ID: {query.from_user.id}"
     await query.message.reply_text(
-        f"✅ Вы начали обсуждение!\n\n📞 Контакт арендатора: {renter_contact}\n\nПосле передачи техники нажмите ниже.",
+        f"✅ Обсуждение заказа #{order_data['id']}!\n\n📞 Контакт арендатора: {renter_contact}",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📦 Техника выдана", callback_data=f"issued_{order_data['id']}")]])
     )
 
@@ -415,18 +528,35 @@ async def reject_order(update: Update, context):
     order_id = int(query.data.split('_')[1])
     
     all_rows = orders_sheet.get_all_values()
-    if order_id < len(all_rows):
-        renter_id = int(all_rows[order_id][2]) if len(all_rows[order_id]) > 2 else 0
-        orders_sheet.update_cell(order_id, 9, "Отклонена")
-        if renter_id:
-            await context.bot.send_message(chat_id=renter_id, text="❌ Арендодатель отклонил вашу заявку.")
+    if order_id < 1 or order_id >= len(all_rows):
+        await query.message.reply_text(f"❌ Заказ #{order_id} не найден.")
+        return
     
-    await query.message.reply_text("❌ Заявка отклонена.")
+    row = all_rows[order_id]
+    renter_id = int(row[2]) if len(row) > 2 and row[2] else 0
+    current_status = row[8] if len(row) > 8 else 'Новая заявка'
+    
+    if current_status != 'Новая заявка':
+        await query.message.reply_text(f"❌ Нельзя отклонить заказ в статусе «{current_status}».")
+        return
+    
+    orders_sheet.update_cell(order_id, 9, "Отклонена")
+    
+    if renter_id:
+        await context.bot.send_message(chat_id=renter_id, text="❌ Арендодатель отклонил вашу заявку.")
+    
+    await query.message.reply_text(f"❌ Заявка #{order_id} отклонена.")
 
 async def mark_issued(update: Update, context):
     query = update.callback_query
     await query.answer()
     order_id = int(query.data.split('_')[1])
+    
+    all_rows = orders_sheet.get_all_values()
+    if order_id < 1 or order_id >= len(all_rows):
+        await query.message.reply_text(f"❌ Заказ #{order_id} не найден.")
+        return
+    
     orders_sheet.update_cell(order_id, 9, "Техника выдана")
     await query.message.reply_text(
         "✅ Техника выдана.\n\nПосле возврата нажмите:",
@@ -437,10 +567,16 @@ async def mark_returned(update: Update, context):
     query = update.callback_query
     await query.answer()
     order_id = int(query.data.split('_')[1])
+    
+    all_rows = orders_sheet.get_all_values()
+    if order_id < 1 or order_id >= len(all_rows):
+        await query.message.reply_text(f"❌ Заказ #{order_id} не найден.")
+        return
+    
     orders_sheet.update_cell(order_id, 9, "Завершён")
     await query.message.reply_text("✅ Техника возвращена. Спасибо!")
 
-# ========== МОИ ОБЪЯВЛЕНИЯ (callback) ==========
+# ========== МОИ ОБЪЯВЛЕНИЯ ==========
 async def my_ads_callback(update: Update, context):
     user_id = update.effective_user.id
     items = get_items_from_sheets()
@@ -478,11 +614,11 @@ async def help_start(update: Update, context):
     if update.callback_query:
         await update.callback_query.answer()
         await update.callback_query.message.reply_text(
-            "🆘 Напишите ваш вопрос или проблему.\n\nЯ перешлю его менеджеру.\n\n✏️ Введите ваше сообщение:"
+            "🆘 Напишите ваш вопрос.\n\nЯ перешлю менеджеру.\n\n✏️ Введите сообщение:"
         )
     else:
         await update.message.reply_text(
-            "🆘 Напишите ваш вопрос или проблему.\n\nЯ перешлю его менеджеру.\n\n✏️ Введите ваше сообщение:"
+            "🆘 Напишите ваш вопрос.\n\nЯ перешлю менеджеру.\n\n✏️ Введите сообщение:"
         )
     return HELP_MESSAGE
 
@@ -492,24 +628,24 @@ async def help_send(update: Update, context):
     user_link = f"@{user.username}" if user.username else f"Пользователь {user.id}"
     
     if not MANAGER_IDS:
-        await update.message.reply_text("🆘 Менеджер пока не назначен.")
+        await update.message.reply_text("🆘 Менеджер не назначен.")
         return ConversationHandler.END
     
-    success_count = 0
+    success = 0
     for manager_id in MANAGER_IDS:
         try:
-            keyboard = [[InlineKeyboardButton(f"✏️ Ответить", callback_data=f"reply_{user.id}")]]
+            keyboard = [[InlineKeyboardButton("✏️ Ответить", callback_data=f"reply_{user.id}")]]
             await context.bot.send_message(
                 chat_id=manager_id,
                 text=f"📩 *Новое обращение*\n👤 {user_link}\n🆔 {user.id}\n📝 {user_message}",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
-            success_count += 1
+            success += 1
         except Exception as e:
             print(f"Ошибка: {e}")
     
-    await update.message.reply_text(f"🆘 Сообщение отправлено {success_count} менеджер(ам).\n\nОтвет поступит в ближайшее время.")
+    await update.message.reply_text(f"🆘 Сообщение отправлено {success} менеджер(ам).\n\nОтвет поступит в ближайшее время.")
     return ConversationHandler.END
 
 async def help_cancel(update: Update, context):
@@ -522,7 +658,7 @@ async def reply_button_handler(update: Update, context):
     await query.answer()
     
     if query.from_user.id not in MANAGER_IDS:
-        await query.message.reply_text("❌ У вас нет прав.")
+        await query.message.reply_text("❌ Нет прав.")
         return
     
     user_id = int(query.data.split('_')[1])
@@ -533,7 +669,7 @@ async def reply_button_handler(update: Update, context):
 async def send_reply_to_user(update: Update, context):
     user_id = context.user_data.get('replying_to')
     if not user_id:
-        await update.message.reply_text("❌ Ошибка")
+        await update.message.reply_text("❌ Ошибка.")
         return
     
     try:
@@ -550,7 +686,7 @@ async def send_reply_to_user(update: Update, context):
 
 async def cancel_reply(update: Update, context):
     context.user_data['replying_to'] = None
-    await update.message.reply_text("❌ Ответ отменён.")
+    await update.message.reply_text("❌ Отменено.")
     return ConversationHandler.END
 
 # ========== ДОБАВЛЕНИЕ ТЕХНИКИ ==========
@@ -614,62 +750,13 @@ async def unknown(update: Update, context):
 async def run_bot():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
+    # Команды
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("my_ads", my_ads_command))
     application.add_handler(CommandHandler("my_orders", my_orders_command))
-    
+
+    # Базовые callback
     application.add_handler(CallbackQueryHandler(role_choice, pattern="^role_"))
-    application.add_handler(CallbackQueryHandler(catalog, pattern="^catalog$"))
     application.add_handler(CallbackQueryHandler(my_ads_callback, pattern="^my_ads$"))
     application.add_handler(CallbackQueryHandler(my_orders_command, pattern="^my_orders$"))
-    application.add_handler(CallbackQueryHandler(delete_item, pattern="^delete_"))
-    application.add_handler(CallbackQueryHandler(discuss_order, pattern="^discuss_"))
-    application.add_handler(CallbackQueryHandler(reject_order, pattern="^reject_"))
-    application.add_handler(CallbackQueryHandler(mark_issued, pattern="^issued_"))
-    application.add_handler(CallbackQueryHandler(mark_returned, pattern="^returned_"))
-
-    application.add_handler(ConversationHandler(
-        entry_points=[CallbackQueryHandler(start_booking, pattern="^book_")],
-        states={SELECT_DAY: [CallbackQueryHandler(select_day, pattern="^day_")], SELECT_HOUR: [CallbackQueryHandler(select_hour, pattern="^hour_")], SELECT_DURATION: [CallbackQueryHandler(select_duration, pattern="^dur_")]},
-        fallbacks=[],
-    ))
-
-    application.add_handler(ConversationHandler(
-        entry_points=[CallbackQueryHandler(add_item_start, pattern="^add_item$")],
-        states={NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_item_name)], PHOTO: [MessageHandler(filters.PHOTO, add_item_photo)], PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_item_price)], MIN_HOURS: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_item_min_hours)], CITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_item_city)], DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_item_description)], CONTACT: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_item_contact)]},
-        fallbacks=[CommandHandler("cancel", cancel)],
-    ))
-
-    application.add_handler(ConversationHandler(
-        entry_points=[CallbackQueryHandler(help_start, pattern="^help$"), CommandHandler("help", help_start)],
-        states={HELP_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, help_send)]},
-        fallbacks=[CommandHandler("cancel", help_cancel)],
-    ))
-
-    application.add_handler(ConversationHandler(
-        entry_points=[CallbackQueryHandler(reply_button_handler, pattern="^reply_")],
-        states={AWAITING_REPLY_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, send_reply_to_user)]},
-        fallbacks=[CommandHandler("cancel", cancel_reply)],
-    ))
-
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, unknown))
-    print("🚀 Бот запущен!")
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling()
-    while True:
-        await asyncio.sleep(1)
-
-# ========== FLASK ==========
-@app.route('/')
-def home():
-    return "Bot is running!"
-
-@app.route('/health')
-def health():
-    return "OK", 200
-
-if __name__ == "__main__":
-    init_google_sheets()
-    threading.Thread(target=lambda: asyncio.run(run_bot()), daemon=True).start()
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+    application.add_handler(CallbackQueryHandler(delete_item,
